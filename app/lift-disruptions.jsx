@@ -1,8 +1,8 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import {
   ActivityIndicator,
-  FlatList,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -11,17 +11,23 @@ import {
 import { useRouter } from "expo-router";
 import {
   fetchLiftDisruptions,
-  searchDisruptions,
+  searchStations,
+  findDisruptionsForStation,
 } from "../services/liftDisruptions";
 
 export default function LiftDisruptionsScreen() {
   const router = useRouter();
   const [query, setQuery] = useState("");
+  const [suggestions, setSuggestions] = useState([]);
+  const [selectedStation, setSelectedStation] = useState(null);
+  const [stationDisruptions, setStationDisruptions] = useState([]);
   const [allDisruptions, setAllDisruptions] = useState([]);
-  const [results, setResults] = useState([]);
   const [fetchedAt, setFetchedAt] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [searchingStations, setSearchingStations] = useState(false);
   const [error, setError] = useState(null);
+  const [dropdownOpen, setDropdownOpen] = useState(false);
+  const debounceRef = useRef(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -41,28 +47,47 @@ export default function LiftDisruptionsScreen() {
     load();
   }, [load]);
 
-  useEffect(() => {
-    if (query.trim()) {
-      setResults(searchDisruptions(allDisruptions, query));
-    } else {
-      setResults([]);
+  const handleQueryChange = (text) => {
+    setQuery(text);
+    setSelectedStation(null);
+    setStationDisruptions([]);
+
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+
+    if (text.trim().length < 2) {
+      setSuggestions([]);
+      setDropdownOpen(false);
+      return;
     }
-  }, [query, allDisruptions]);
+
+    debounceRef.current = setTimeout(async () => {
+      setSearchingStations(true);
+      const results = await searchStations(text);
+      setSuggestions(results);
+      setDropdownOpen(results.length > 0);
+      setSearchingStations(false);
+    }, 300);
+  };
+
+  const handleSelectStation = (station) => {
+    setQuery(station.name);
+    setSelectedStation(station);
+    setSuggestions([]);
+    setDropdownOpen(false);
+
+    const disruptions = findDisruptionsForStation(
+      allDisruptions,
+      station.name
+    );
+    setStationDisruptions(disruptions);
+  };
 
   const formatDate = (iso) => {
     const d = new Date(iso);
     return d.toLocaleString();
   };
 
-  const renderItem = ({ item }) => (
-    <View style={styles.card}>
-      <Text style={styles.stationName}>{item.stopPointName}</Text>
-      <Text style={styles.route}>
-        {item.outageStartArea} → {item.outageEndArea}
-      </Text>
-      <Text style={styles.message}>{item.message}</Text>
-    </View>
-  );
+  const hasDisruptions = stationDisruptions.length > 0;
 
   return (
     <View style={styles.container}>
@@ -73,25 +98,10 @@ export default function LiftDisruptionsScreen() {
         <Text style={styles.title}>Lift Disruptions</Text>
       </View>
 
-      <TextInput
-        style={styles.searchInput}
-        placeholder="Search by station name..."
-        value={query}
-        onChangeText={setQuery}
-        autoCapitalize="none"
-        autoCorrect={false}
-      />
-
-      {fetchedAt && (
-        <Text style={styles.timestamp}>
-          Last updated: {formatDate(fetchedAt)}
-        </Text>
-      )}
-
       {loading && (
         <View style={styles.centered}>
           <ActivityIndicator size="large" color="#003688" />
-          <Text style={styles.loadingText}>Loading disruptions...</Text>
+          <Text style={styles.loadingText}>Loading disruption data...</Text>
         </View>
       )}
 
@@ -104,34 +114,131 @@ export default function LiftDisruptionsScreen() {
         </View>
       )}
 
-      {!loading && !error && query.trim() !== "" && results.length === 0 && (
-        <View style={styles.centered}>
-          <Text style={styles.noResults}>
-            No lift disruptions found for "{query}".
-          </Text>
-        </View>
-      )}
+      {!loading && !error && (
+        <>
+          <View style={styles.searchWrapper}>
+            <TextInput
+              style={styles.searchInput}
+              placeholder="Search for a station..."
+              value={query}
+              onChangeText={handleQueryChange}
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+            {searchingStations && (
+              <ActivityIndicator
+                size="small"
+                color="#003688"
+                style={styles.searchSpinner}
+              />
+            )}
 
-      {!loading && !error && !query.trim() && (
-        <View style={styles.centered}>
-          <Text style={styles.noResults}>
-            Enter a station name above to check lift status.
-          </Text>
-          <Text style={styles.totalCount}>
-            {allDisruptions.length} disruption
-            {allDisruptions.length !== 1 ? "s" : ""} currently reported.
-          </Text>
-        </View>
-      )}
+            {dropdownOpen && (
+              <View style={styles.dropdown}>
+                <ScrollView
+                  keyboardShouldPersistTaps="handled"
+                  nestedScrollEnabled
+                  style={styles.dropdownScroll}
+                >
+                  {suggestions.map((station, index) => (
+                    <Pressable
+                      key={`${station.naptanId}-${index}`}
+                      style={({ pressed }) => [
+                        styles.dropdownItem,
+                        pressed && styles.dropdownItemPressed,
+                      ]}
+                      onPress={() => handleSelectStation(station)}
+                    >
+                      <Text style={styles.dropdownText}>{station.name}</Text>
+                    </Pressable>
+                  ))}
+                </ScrollView>
+              </View>
+            )}
+          </View>
 
-      <FlatList
-        data={results}
-        keyExtractor={(item, index) =>
-          `${item.naptanCode}-${item.outageStartArea}-${index}`
-        }
-        renderItem={renderItem}
-        contentContainerStyle={styles.list}
-      />
+          {!selectedStation && (
+            <View style={styles.centered}>
+              <Text style={styles.hint}>
+                Enter a station name above to check lift status.
+              </Text>
+              <Text style={styles.totalCount}>
+                {allDisruptions.length} disruption
+                {allDisruptions.length !== 1 ? "s" : ""} currently reported
+                across the network.
+              </Text>
+            </View>
+          )}
+
+          {selectedStation && (
+            <ScrollView
+              style={styles.resultsScroll}
+              contentContainerStyle={styles.resultsContent}
+            >
+              <View
+                style={[
+                  styles.statusCard,
+                  hasDisruptions
+                    ? styles.statusCardDisrupted
+                    : styles.statusCardOk,
+                ]}
+              >
+                <Text style={styles.cardStationName}>
+                  {selectedStation.name}
+                </Text>
+
+                <View
+                  style={[
+                    styles.statusBadge,
+                    hasDisruptions
+                      ? styles.badgeDisrupted
+                      : styles.badgeOk,
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.statusBadgeText,
+                      hasDisruptions
+                        ? styles.badgeTextDisrupted
+                        : styles.badgeTextOk,
+                    ]}
+                  >
+                    {hasDisruptions
+                      ? `${stationDisruptions.length} lift disruption${stationDisruptions.length !== 1 ? "s" : ""}`
+                      : "No lift disruptions"}
+                  </Text>
+                </View>
+
+                {fetchedAt && (
+                  <Text style={styles.cardTimestamp}>
+                    Status checked: {formatDate(fetchedAt)}
+                  </Text>
+                )}
+              </View>
+
+              {stationDisruptions.map((d, i) => (
+                <View key={`disruption-${i}`} style={styles.disruptionCard}>
+                  <View style={styles.disruptionHeader}>
+                    <Text style={styles.disruptionRoute}>
+                      {d.outageStartArea} → {d.outageEndArea}
+                    </Text>
+                  </View>
+                  <Text style={styles.disruptionMessage}>{d.message}</Text>
+                </View>
+              ))}
+
+              {!hasDisruptions && (
+                <View style={styles.allClearCard}>
+                  <Text style={styles.allClearText}>
+                    All lifts at {selectedStation.name} are currently
+                    operational. Step-free access should be available.
+                  </Text>
+                </View>
+              )}
+            </ScrollView>
+          )}
+        </>
+      )}
     </View>
   );
 }
@@ -161,8 +268,11 @@ const styles = StyleSheet.create({
     fontWeight: "bold",
     color: "#003688",
   },
-  searchInput: {
+  searchWrapper: {
     marginHorizontal: 16,
+    zIndex: 10,
+  },
+  searchInput: {
     padding: 12,
     fontSize: 16,
     backgroundColor: "#fff",
@@ -170,11 +280,39 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#ddd",
   },
-  timestamp: {
-    marginHorizontal: 16,
-    marginTop: 8,
-    fontSize: 12,
-    color: "#666",
+  searchSpinner: {
+    position: "absolute",
+    right: 12,
+    top: 14,
+  },
+  dropdown: {
+    backgroundColor: "#fff",
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "#ddd",
+    marginTop: 4,
+    maxHeight: 220,
+    shadowColor: "#000",
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 4,
+  },
+  dropdownScroll: {
+    maxHeight: 220,
+  },
+  dropdownItem: {
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: "#f0f0f0",
+  },
+  dropdownItemPressed: {
+    backgroundColor: "#e8eef7",
+  },
+  dropdownText: {
+    fontSize: 15,
+    color: "#333",
   },
   centered: {
     alignItems: "center",
@@ -203,7 +341,7 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: "600",
   },
-  noResults: {
+  hint: {
     fontSize: 14,
     color: "#666",
     textAlign: "center",
@@ -213,11 +351,60 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: "#999",
   },
-  list: {
-    paddingHorizontal: 16,
-    paddingBottom: 32,
+  resultsScroll: {
+    flex: 1,
   },
-  card: {
+  resultsContent: {
+    padding: 16,
+    paddingBottom: 40,
+  },
+  statusCard: {
+    borderRadius: 12,
+    padding: 20,
+    borderLeftWidth: 5,
+  },
+  statusCardDisrupted: {
+    backgroundColor: "#fff5f5",
+    borderLeftColor: "#d32f2f",
+  },
+  statusCardOk: {
+    backgroundColor: "#f0faf0",
+    borderLeftColor: "#2e7d32",
+  },
+  cardStationName: {
+    fontSize: 18,
+    fontWeight: "bold",
+    color: "#003688",
+    marginBottom: 12,
+  },
+  statusBadge: {
+    alignSelf: "flex-start",
+    paddingVertical: 6,
+    paddingHorizontal: 14,
+    borderRadius: 20,
+    marginBottom: 12,
+  },
+  badgeDisrupted: {
+    backgroundColor: "#d32f2f",
+  },
+  badgeOk: {
+    backgroundColor: "#2e7d32",
+  },
+  statusBadgeText: {
+    fontSize: 14,
+    fontWeight: "600",
+  },
+  badgeTextDisrupted: {
+    color: "#fff",
+  },
+  badgeTextOk: {
+    color: "#fff",
+  },
+  cardTimestamp: {
+    fontSize: 12,
+    color: "#888",
+  },
+  disruptionCard: {
     backgroundColor: "#fff",
     borderRadius: 8,
     padding: 16,
@@ -230,18 +417,28 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 2 },
     elevation: 2,
   },
-  stationName: {
-    fontSize: 16,
-    fontWeight: "bold",
-    color: "#003688",
-    marginBottom: 4,
-  },
-  route: {
-    fontSize: 13,
-    color: "#666",
+  disruptionHeader: {
     marginBottom: 8,
   },
-  message: {
+  disruptionRoute: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: "#555",
+  },
+  disruptionMessage: {
+    fontSize: 14,
+    color: "#333",
+    lineHeight: 20,
+  },
+  allClearCard: {
+    backgroundColor: "#fff",
+    borderRadius: 8,
+    padding: 16,
+    marginTop: 12,
+    borderLeftWidth: 4,
+    borderLeftColor: "#2e7d32",
+  },
+  allClearText: {
     fontSize: 14,
     color: "#333",
     lineHeight: 20,
